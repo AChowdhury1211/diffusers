@@ -28,19 +28,7 @@ from diffusers.utils.import_utils import is_torch_xla_available
 
 enable_full_determinism()
 
-if not is_torch_xla_available():
-    mock_flash_attention = MagicMock()
-    
-    with patch.dict("sys.modules", {"torch_xla": MagicMock(), 
-                                   "torch_xla.experimental.custom_kernel": MagicMock(), 
-                                   "torch_xla.runtime": MagicMock()}):
-        import sys
-        sys.modules["torch_xla.experimental.custom_kernel"].flash_attention = mock_flash_attention
-        with patch("diffusers.utils.import_utils.is_torch_xla_available", return_value=True):
-            with patch("diffusers.utils.import_utils.is_torch_xla_version", return_value=True):
-                from diffusers.models.transformers.transformer_ltx import LTXVideoTransformerBlock
-else:
-    from diffusers.models.transformers.transformer_ltx import LTXVideoTransformerBlock
+from diffusers.models.transformers.transformer_ltx import LTXVideoTransformerBlock
 
 
 class LTXTransformerTests(ModelTesterMixin, TorchCompileTesterMixin, unittest.TestCase):
@@ -115,11 +103,12 @@ class TestTPUFlashAttention(unittest.TestCase):
         seq_len = 128  
         hidden_dim = 16
         
-        hidden_states = torch.randn((batch_size, seq_len, hidden_dim))
-        encoder_hidden_states = torch.randn((batch_size, seq_len, hidden_dim))
-        temb = torch.randn((batch_size, hidden_dim))
+        hidden_states = torch.randn((batch_size, num_frames * height * width, num_channels)).to(torch_device)
+        encoder_hidden_states = torch.randn((batch_size, sequence_length, embedding_dim)).to(torch_device)
+        encoder_attention_mask = torch.ones((batch_size, sequence_length)).bool().to(torch_device)
+        timestep = torch.randint(0, 1000, size=(batch_size,)).to(torch_device)
         
-        mock_flash_attn.return_value = torch.randn((batch_size, 2, seq_len, 8))
+        mock_flash_attn.return_value = torch.randn((batch_size * 2, seq_len, 8))
         
         block(hidden_states, encoder_hidden_states, temb)
         
@@ -143,7 +132,7 @@ class TestTPUFlashAttention(unittest.TestCase):
         encoder_hidden_states = torch.randn((batch_size, seq_len, hidden_dim))
         temb = torch.randn((batch_size, hidden_dim))
         
-        mock_sdp.return_value = torch.randn((batch_size, 2, seq_len, 8))
+        mock_sdp.return_value = torch.randn((batch_size * 2, seq_len, 8))
         
         block(hidden_states, encoder_hidden_states, temb)
         
