@@ -143,6 +143,7 @@ _deps = [
     "black",
     "phonemizer",
     "opencv-python",
+    "torch_xla[tpu]",
 ]
 
 # this is a lookup table with items like:
