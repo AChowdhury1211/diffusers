@@ -22,8 +22,25 @@ from diffusers.utils.testing_utils import enable_full_determinism, torch_device
 
 from ..test_modeling_common import ModelTesterMixin, TorchCompileTesterMixin
 
+from unittest.mock import patch, MagicMock
+
+from diffusers.utils.import_utils import is_torch_xla_available
 
 enable_full_determinism()
+
+if not is_torch_xla_available():
+    mock_flash_attention = MagicMock()
+    
+    with patch.dict("sys.modules", {"torch_xla": MagicMock(), 
+                                   "torch_xla.experimental.custom_kernel": MagicMock(), 
+                                   "torch_xla.runtime": MagicMock()}):
+        import sys
+        sys.modules["torch_xla.experimental.custom_kernel"].flash_attention = mock_flash_attention
+        with patch("diffusers.utils.import_utils.is_torch_xla_available", return_value=True):
+            with patch("diffusers.utils.import_utils.is_torch_xla_version", return_value=True):
+                from diffusers.models.transformers.transformer_ltx import LTXVideoTransformerBlock
+else:
+    from diffusers.models.transformers.transformer_ltx import LTXVideoTransformerBlock
 
 
 class LTXTransformerTests(ModelTesterMixin, TorchCompileTesterMixin, unittest.TestCase):
@@ -81,3 +98,53 @@ class LTXTransformerTests(ModelTesterMixin, TorchCompileTesterMixin, unittest.Te
     def test_gradient_checkpointing_is_applied(self):
         expected_set = {"LTXVideoTransformer3DModel"}
         super().test_gradient_checkpointing_is_applied(expected_set=expected_set)
+
+
+class TestTPUFlashAttention(unittest.TestCase):
+    @patch("torch_xla.experimental.custom_kernel.flash_attention")
+    def test_flash_attention_called_when_flag_is_true(self, mock_flash_attn):
+        block = LTXVideoTransformerBlock(
+            dim=16,
+            num_attention_heads=2,
+            attention_head_dim=8,
+            cross_attention_dim=16,
+            use_tpu_flash_attention=True,
+        )
+        
+        batch_size = 2
+        seq_len = 128  
+        hidden_dim = 16
+        
+        hidden_states = torch.randn((batch_size, seq_len, hidden_dim))
+        encoder_hidden_states = torch.randn((batch_size, seq_len, hidden_dim))
+        temb = torch.randn((batch_size, hidden_dim))
+        
+        mock_flash_attn.return_value = torch.randn((batch_size, 2, seq_len, 8))
+        
+        block(hidden_states, encoder_hidden_states, temb)
+        
+        self.assertTrue(mock_flash_attn.called)
+    
+    @patch("torch.nn.functional.scaled_dot_product_attention")
+    def test_scaled_dot_product_attention_called_when_flag_is_false(self, mock_sdp):
+        with patch("diffusers.utils.import_utils.is_torch_xla_available", return_value=False):
+            block = LTXVideoTransformerBlock(
+                dim=16,
+                num_attention_heads=2,
+                attention_head_dim=8,
+                cross_attention_dim=16,
+                use_tpu_flash_attention=False,
+            )
+        batch_size = 2
+        seq_len = 128
+        hidden_dim = 16
+        
+        hidden_states = torch.randn((batch_size, seq_len, hidden_dim))
+        encoder_hidden_states = torch.randn((batch_size, seq_len, hidden_dim))
+        temb = torch.randn((batch_size, hidden_dim))
+        
+        mock_sdp.return_value = torch.randn((batch_size, 2, seq_len, 8))
+        
+        block(hidden_states, encoder_hidden_states, temb)
+        
+        self.assertTrue(mock_sdp.called)
