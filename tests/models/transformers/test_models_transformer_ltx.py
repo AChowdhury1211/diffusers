@@ -206,40 +206,34 @@ class AttnAddedLTXVideoAttentionProcessor2_0Tests(unittest.TestCase):
                 assert torch.equal(processor_kwargs['encoder_hidden_states'], forward_args['encoder_hidden_states'])
                 assert processor_kwargs['attention_mask'] == forward_args['attention_mask']
                 
-def test_use_tpu_flash_attention_flag_when_tpu_is_not_available_try2(self):
-    torch.manual_seed(0)
-    
-    constructor_args = self.get_constructor_arguments()
-    attn = Attention(**constructor_args)
-    
-    processor = attn.get_processor()
-    assert isinstance(processor, LTXVideoAttentionProcessor2_0), "Processor not LTXVideoAttentionProcessor2_0"
-    
-    # Create a proper mock that doesn't execute the actual function
-    mock_flash_attention = MagicMock()
-    
-    # Configure the mock to return a tensor of the proper shape
-    batch_size = 1  # Adjust based on your test setup
-    num_heads = 1   # Adjust based on your test setup 
-    q_seq_len = 4   # Adjust based on your test setup
-    head_dim = 4    # Adjust based on your test setup
-    mock_flash_attention.return_value = torch.zeros((batch_size, num_heads, q_seq_len, head_dim))
-    
-    # Patch at the correct module level where flash_attention is imported/used in transformer_ltx.py
-    import_path = 'diffusers.models.transformers.transformer_ltx.flash_attention'
-    
-    with patch(import_path, mock_flash_attention):
-        forward_args = self.get_forward_arguments(
-            query_dim=constructor_args["query_dim"],
-            tpu_fast_attention=False,
-        )
+    def test_use_tpu_flash_attention_flag_when_tpu_is_not_available_try2(self):
+        torch.manual_seed(0)
         
-        # Try to call attn with our args
-        try:
-            attn_hidden_states = attn(**forward_args)
-        except Exception as e:
-            # If there's an exception, we still want to verify our mock was called
-            pass
+        constructor_args = self.get_constructor_arguments()
+        attn = Attention(**constructor_args)
         
-        # Assert that our mock was called
-        mock_flash_attention.assert_called_once()
+        processor = attn.get_processor()
+        assert isinstance(processor, LTXVideoAttentionProcessor2_0), "Processor not LTXVideoAttentionProcessor2_0"
+        
+        mock_flash_attention = MagicMock()
+        
+        batch_size = 1  
+        num_heads = 1
+        q_seq_len = 4
+        head_dim = 4
+        mock_flash_attention.return_value = torch.zeros((batch_size, num_heads, q_seq_len, head_dim))
+        
+        import_path = 'diffusers.models.transformers.transformer_ltx.flash_attention'
+        
+        with patch(import_path, mock_flash_attention):
+            forward_args = self.get_forward_arguments(
+                query_dim=constructor_args["query_dim"],
+                tpu_fast_attention=False,
+            )
+            
+            try:
+                attn_hidden_states = attn(**forward_args)
+            except Exception as e:
+                pass
+            
+            mock_flash_attention.assert_called_once()
