@@ -95,7 +95,7 @@ class LTXTransformerTests(ModelTesterMixin, TorchCompileTesterMixin, unittest.Te
         expected_set = {"LTXVideoTransformer3DModel"}
         super().test_gradient_checkpointing_is_applied(expected_set=expected_set)
 
-@unittest.skip("Skipping flash attention tests")
+
 class TestLTXVideoAttentionProcessor2_0(unittest.TestCase):
     def setUp(self):
         if not hasattr(F, "scaled_dot_product_attention"):
