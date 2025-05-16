@@ -117,11 +117,10 @@ class AttnAddedLTXVideoAttentionProcessor2_0Tests(unittest.TestCase):
         
     def get_forward_arguments(self, query_dim):
         batch_size = 2
-        added_kv_proj_dim = 6
         sequence_length = 4096
 
         hidden_states = torch.rand(batch_size,sequence_length, query_dim)
-        encoder_hidden_states = torch.rand(batch_size, 4, added_kv_proj_dim)
+        encoder_hidden_states = torch.rand(batch_size, 4, query_dim)
         attention_mask = None
 
         return {
