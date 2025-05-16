@@ -14,28 +14,16 @@
 # limitations under the License.
 
 import unittest
-import pytest
 
 import torch
-
-import torch.nn.functional as F
 
 from diffusers import LTXVideoTransformer3DModel
 from diffusers.utils.testing_utils import enable_full_determinism, torch_device
 
 from ..test_modeling_common import ModelTesterMixin, TorchCompileTesterMixin
 
-from unittest.mock import patch, MagicMock
 
 enable_full_determinism()
-
-from diffusers.models.attention_processor import Attention
-from diffusers.models.transformers.transformer_ltx import LTXVideoAttentionProcessor2_0
-try:
-    from torch_xla.experimental.custom_kernel import flash_attention
-except ImportError:
-    print("flash_attention not available.")
-    pass
 
 
 class LTXTransformerTests(ModelTesterMixin, TorchCompileTesterMixin, unittest.TestCase):
@@ -93,115 +81,3 @@ class LTXTransformerTests(ModelTesterMixin, TorchCompileTesterMixin, unittest.Te
     def test_gradient_checkpointing_is_applied(self):
         expected_set = {"LTXVideoTransformer3DModel"}
         super().test_gradient_checkpointing_is_applied(expected_set=expected_set)
-
-
-class AttnAddedLTXVideoAttentionProcessor2_0Tests(unittest.TestCase):
-    def get_constructor_arguments(self, cross_attention: bool = False):
-        if cross_attention:
-            cross_attention_dim = 8
-        else:
-            cross_attention_dim = None
-            
-        return {
-            "query_dim": 8, # query_dim = num_attention_heads * attention_head_dim
-            "heads": 2, 
-            "kv_heads": 2, 
-            "dim_head": 4, #  
-            "bias" : True,
-            "cross_attention_dim": cross_attention_dim,
-            "out_bias": True,
-            "qk_norm":"rms_norm_across_heads",
-            "processor": LTXVideoAttentionProcessor2_0(),
-            "use_tpu_flash_attention" : True,
-        }
-        
-    def get_forward_arguments(self, query_dim, tpu_fast_attention: bool = False):
-        if tpu_fast_attention:
-            try:
-                import torch_xla.core.xla_model as xm
-            except ImportError:
-                print("torch_xla not available.")
-                pass
-        batch_size = 2
-        sequence_length = 4096
-        enco_sequence_length = 128
-        
-        if tpu_fast_attention:
-            device = xm.xla_device()
-            hidden_states = torch.rand(batch_size, sequence_length, query_dim).to(device)
-            encoder_hidden_states = torch.rand(batch_size, enco_sequence_length, query_dim).to(device)
-            
-        else:
-            hidden_states = torch.rand(batch_size,sequence_length, query_dim)
-            encoder_hidden_states = torch.rand(batch_size, 4, query_dim)
-        attention_mask = None
-
-        return {
-            "hidden_states": hidden_states,
-            "encoder_hidden_states": encoder_hidden_states,
-            "attention_mask": attention_mask,
-        }
-    
-    def test_use_tpu_flash_attention_flag_when_tpu_is_available(self):
-        torch.manual_seed(0)
-        
-        constructor_args = self.get_constructor_arguments()
-        attn = Attention(**constructor_args)
-
-        processor = attn.get_processor()
-        assert isinstance(processor, LTXVideoAttentionProcessor2_0), "Processor not LTXVideoAttentionProcessor2_0"
-        
-        with patch.object(processor, '__call__') as mock_processor_call:
-            with patch('torch_xla.experimental.custom_kernel.flash_attention') as mock_flash_attention:
-                
-                forward_args = self.get_forward_arguments(
-                    query_dim=constructor_args["query_dim"], 
-                    tpu_fast_attention=True,
-                )
-                attn_hidden_states = attn(**forward_args)
-
-                mock_processor_call.assert_called_once()
-
-                processor_args = mock_processor_call.call_args[0]
-                processor_kwargs = mock_processor_call.call_args[1]
-                
-                assert processor_args[0] == attn
-                assert torch.equal(processor_args[1], forward_args['hidden_states'])
-                assert torch.equal(processor_kwargs['encoder_hidden_states'], forward_args['encoder_hidden_states'])
-                assert processor_kwargs['attention_mask'] == forward_args['attention_mask']
-    
-    def test_use_tpu_flash_attention_flag_when_tpu_is_not_available(self):
-        torch.manual_seed(0)
-        
-        constructor_args = self.get_constructor_arguments()
-        attn = Attention(**constructor_args)
-
-        processor = attn.get_processor()
-        assert isinstance(processor, LTXVideoAttentionProcessor2_0), "Processor not LTXVideoAttentionProcessor2_0"
-        
-        def mock_flash_attention_fn(*args, **kwargs):
-            batch_size = kwargs['q'].shape[0]
-            num_heads = kwargs['q'].shape[1]
-            q_seq_len = kwargs['q'].shape[2]
-            head_dim = kwargs['q'].shape[3]
-
-            return torch.zeros((batch_size, num_heads, q_seq_len, head_dim))
-        
-        with patch.object(processor, '__call__',wraps=processor.__call__ ) as mock_processor_call:
-            with patch('torch_xla.experimental.custom_kernel.flash_attention', mock_flash_attention_fn):
-                
-                forward_args = self.get_forward_arguments(
-                    query_dim=constructor_args["query_dim"], 
-                    tpu_fast_attention=False,
-                )
-                attn_hidden_states = attn(**forward_args)
-
-                mock_processor_call.assert_called_once()
-
-                processor_args = mock_processor_call.call_args[0]
-                processor_kwargs = mock_processor_call.call_args[1]
-                
-                assert processor_args[0] == attn
-                assert torch.equal(processor_args[1], forward_args['hidden_states'])
-                assert torch.equal(processor_kwargs['encoder_hidden_states'], forward_args['encoder_hidden_states'])
-                assert processor_kwargs['attention_mask'] == forward_args['attention_mask']

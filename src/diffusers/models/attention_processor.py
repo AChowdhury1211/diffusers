@@ -36,17 +36,14 @@ if is_xformers_available():
 else:
     xformers = None
 
-try:
-    if is_torch_xla_available():
-        # flash attention pallas kernel is introduced in the torch_xla 2.3 release.
-        if is_torch_xla_version(">", "2.2"):
-            from torch_xla.experimental.custom_kernel import flash_attention
-            from torch_xla.runtime import is_spmd
-        XLA_AVAILABLE = True
-    else:
-        XLA_AVAILABLE = False
-except ImportError:
-    pass
+if is_torch_xla_available():
+    # flash attention pallas kernel is introduced in the torch_xla 2.3 release.
+    if is_torch_xla_version(">", "2.2"):
+        from torch_xla.experimental.custom_kernel import flash_attention
+        from torch_xla.runtime import is_spmd
+    XLA_AVAILABLE = True
+else:
+    XLA_AVAILABLE = False
 
 
 @maybe_allow_in_graph
@@ -137,7 +134,6 @@ class Attention(nn.Module):
         pre_only=False,
         elementwise_affine: bool = True,
         is_causal: bool = False,
-        use_tpu_flash_attention: bool = False,
     ):
         super().__init__()
 
@@ -161,7 +157,6 @@ class Attention(nn.Module):
         self.context_pre_only = context_pre_only
         self.pre_only = pre_only
         self.is_causal = is_causal
-        self.use_tpu_flash_attention = use_tpu_flash_attention
 
         # we make use of this private variable to know whether this class is loaded
         # with an deprecated state dict so that we can convert it on the fly

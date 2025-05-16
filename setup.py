@@ -143,7 +143,6 @@ _deps = [
     "black",
     "phonemizer",
     "opencv-python",
-    "torch_xla[tpu]",
 ]
 
 # this is a lookup table with items like:
@@ -245,7 +244,6 @@ extras["bitsandbytes"] = deps_list("bitsandbytes", "accelerate")
 extras["gguf"] = deps_list("gguf", "accelerate")
 extras["optimum_quanto"] = deps_list("optimum_quanto", "accelerate")
 extras["torchao"] = deps_list("torchao", "accelerate")
-extras["tpu"] = deps_list("torch_xla[tpu]")
 
 if os.name == "nt":  # windows
     extras["flax"] = []  # jax is not supported on windows
