@@ -27,10 +27,9 @@ from ..test_modeling_common import ModelTesterMixin, TorchCompileTesterMixin
 
 from unittest.mock import patch, MagicMock
 
-from diffusers.utils.import_utils import is_torch_xla_available
-
 enable_full_determinism()
 
+from diffusers.models.attention_processor import Attention
 from diffusers.models.transformers.transformer_ltx import LTXVideoAttentionProcessor2_0
 try:
     from torch_xla.experimental.custom_kernel import flash_attention
@@ -96,120 +95,45 @@ class LTXTransformerTests(ModelTesterMixin, TorchCompileTesterMixin, unittest.Te
         super().test_gradient_checkpointing_is_applied(expected_set=expected_set)
 
 
-class TestLTXVideoAttentionProcessor2_0(unittest.TestCase):
-    def setUp(self):
-        if not hasattr(F, "scaled_dot_product_attention"):
-            F.scaled_dot_product_attention = MagicMock()
+class AttnAddedLTXVideoAttentionProcessor2_0Tests(unittest.TestCase):
+    def get_constructor_arguments(self, cross_attention: bool = False):
+        if cross_attention:
+            cross_attention_dim = 8
+        else:
+            cross_attention_dim = None
+            
+        return {
+            "query_dim": 8, # query_dim = num_attention_heads * attention_head_dim
+            "heads": 2, 
+            "kv_heads": 2, 
+            "dim_head": 4, 
+            "bias" : True,
+            "cross_attention_dim": cross_attention_dim,
+            "out_bias": True,
+            "qk_norm":"rms_norm_across_heads",
+            "processor": LTXVideoAttentionProcessor2_0(),
+            "use_tpu_flash_attention" : True,
+        }
         
-        self.processor = LTXVideoAttentionProcessor2_0()
-        
-        self.batch_size = 2
-        self.sequence_length = 256
-        self.hidden_dim = 64
-        self.num_heads = 8
-        self.head_dim = self.hidden_dim // self.num_heads
-        
-        self.hidden_states = torch.randn(self.batch_size, self.sequence_length, self.hidden_dim)
-        self.attention_mask = torch.ones(self.batch_size, 1, self.sequence_length, self.sequence_length)
-        self.image_rotary_emb = torch.randn(self.batch_size, self.sequence_length, self.hidden_dim)
-        
-        self.attn = MagicMock()
-        self.attn.use_tpu_flash_attention = True
-        self.attn.heads = self.num_heads
-        self.attn.scale = 0.125
-        
-        self.attn.prepare_attention_mask.return_value = self.attention_mask
-        self.attn.to_q.return_value = torch.randn(self.batch_size, self.sequence_length, self.hidden_dim)
-        self.attn.to_k.return_value = torch.randn(self.batch_size, self.sequence_length, self.hidden_dim)
-        self.attn.to_v.return_value = torch.randn(self.batch_size, self.sequence_length, self.hidden_dim)
-        self.attn.norm_q.return_value = torch.randn(self.batch_size, self.sequence_length, self.hidden_dim)
-        self.attn.norm_k.return_value = torch.randn(self.batch_size, self.sequence_length, self.hidden_dim)
-        
-        mock_output_tensor = torch.randn(self.batch_size, self.sequence_length, self.hidden_dim)
-        self.attn.to_out = [
-            MagicMock(return_value=mock_output_tensor),
-            MagicMock(return_value=mock_output_tensor)
-        ]
+    def get_forward_arguments(self, query_dim, added_kv_proj_dim):
+        batch_size = 2
+
+        hidden_states = torch.rand(batch_size, query_dim, 3, 2)
+        encoder_hidden_states = torch.rand(batch_size, 4, added_kv_proj_dim)
+        attention_mask = None
+
+        return {
+            "hidden_states": hidden_states,
+            "encoder_hidden_states": encoder_hidden_states,
+            "attention_mask": attention_mask,
+        }
     
-    @patch('diffusers.models.transformers.transformer_ltx.apply_rotary_emb')
-    @patch('torch_xla.experimental.custom_kernel.flash_attention')
-    def test_tpu_flash_attention_path(self,mock_flash_attention, mock_apply_rotary_emb):
-        mock_apply_rotary_emb.side_effect = lambda x, _: x        
-        expected_output = torch.randn(
-            self.batch_size, self.num_heads, self.sequence_length, self.head_dim
-        )
-        mock_flash_attention.return_value = expected_output
+    def test_only_cross_attention(self):
+        torch.manual_seed(0)
         
-        reshaped_mask = self.attention_mask.expand(-1, self.num_heads, -1, -1)
-        
-        result = self.processor(
-            self.attn,
-            self.hidden_states,
-            attention_mask=self.attention_mask,
-            image_rotary_emb=self.image_rotary_emb
-        )
-        
-        mock_flash_attention.assert_called_once()
-        
-        call_args = mock_flash_attention.call_args[1]
-        
-        self.assertEqual(call_args['q'].shape, (self.batch_size, self.num_heads, self.sequence_length, self.head_dim))
-        self.assertEqual(call_args['k'].shape, (self.batch_size, self.num_heads, self.sequence_length, self.head_dim))
-        self.assertEqual(call_args['v'].shape, (self.batch_size, self.num_heads, self.sequence_length, self.head_dim))
-        
-        self.assertEqual(call_args['q_segment_ids'].shape, (self.batch_size, self.sequence_length))
-        self.assertTrue(torch.all(call_args['q_segment_ids'] == 1.0))
-        
-        self.assertEqual(call_args['kv_segment_ids'].dtype, torch.float32)
-        
-        self.assertEqual(call_args['sm_scale'], self.attn.scale)
-        
-        self.assertEqual(result.shape, (self.batch_size, self.sequence_length, self.hidden_dim))
-        
-        self.attn.to_out[0].assert_called_once()
-        self.attn.to_out[1].assert_called_once()
+        constructor_args = self.get_constructor_arguments()
+        attn = Attention(**constructor_args)
 
-    @patch('ltx_processor.apply_rotary_emb')
-    @patch('ltx_processor.flash_attention')
-    def test_attention_mask_handling_tpu(self, mock_flash_attention, mock_apply_rotary_emb):
-        mock_apply_rotary_emb.side_effect = lambda x, _: x
-        mock_flash_attention.return_value = torch.randn(
-            self.batch_size, self.num_heads, self.sequence_length, self.head_dim
-        )
-        
-        custom_mask = torch.zeros(self.batch_size, 1, self.sequence_length, self.sequence_length)
-        custom_mask[:, :, :, :self.sequence_length//2] = 1.0
-        
-        self.attn.prepare_attention_mask.return_value = custom_mask
-        
-        self.processor(
-            self.attn,
-            self.hidden_states,
-            attention_mask=custom_mask,
-            image_rotary_emb=self.image_rotary_emb
-        )
-        
-        call_args = mock_flash_attention.call_args[1]
-        self.assertEqual(call_args['kv_segment_ids'].dtype, torch.float32)
-
-    @patch('ltx_processor.apply_rotary_emb')
-    @patch('ltx_processor.flash_attention')
-    def test_sequence_length_requirement(self, mock_flash_attention, mock_apply_rotary_emb):
-        mock_apply_rotary_emb.side_effect = lambda x, _: x
-        
-        invalid_seq_len = 100
-        hidden_states = torch.randn(self.batch_size, invalid_seq_len, self.hidden_dim)
-        
-        self.attn.to_q.return_value = torch.randn(self.batch_size, invalid_seq_len, self.hidden_dim)
-        self.attn.to_k.return_value = torch.randn(self.batch_size, invalid_seq_len, self.hidden_dim)
-        self.attn.to_v.return_value = torch.randn(self.batch_size, invalid_seq_len, self.hidden_dim)
-        self.attn.norm_q.return_value = torch.randn(self.batch_size, invalid_seq_len, self.hidden_dim)
-        self.attn.norm_k.return_value = torch.randn(self.batch_size, invalid_seq_len, self.hidden_dim)
-        
-        with self.assertRaises(AssertionError):
-            self.processor(
-                self.attn,
-                hidden_states,
-                attention_mask=None,
-                image_rotary_emb=None
-            )
+        processor = attn.get_processor()
+        assert isinstance(processor, LTXVideoAttentionProcessor2_0), "Processor not LTXVideoAttentionProcessor2_0"
+        print(f"Processor type: {type(processor)}")

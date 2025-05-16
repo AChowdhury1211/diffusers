@@ -93,7 +93,7 @@ class LTXVideoAttentionProcessor2_0:
 
         # the output of sdp = (batch, num_heads, seq_len, head_dim)
         
-        # TODO: add support for attn.scale when we move to Torch 2.1
+        # TODO: add support for attn.scale when moved to Torch 2.1
         if attn.use_tpu_flash_attention:  # use tpu attention offload 'flash attention'
             q_segment_indexes = None
             if (
