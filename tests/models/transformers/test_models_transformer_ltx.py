@@ -140,6 +140,8 @@ class TestLTXVideoAttentionProcessor2_0(unittest.TestCase):
         )
         mock_flash_attention.return_value = expected_output
         
+        reshaped_mask = self.attention_mask.expand(-1, self.num_heads, -1, -1)
+        
         result = self.processor(
             self.attn,
             self.hidden_states,
