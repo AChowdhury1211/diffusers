@@ -106,7 +106,7 @@ class AttnAddedLTXVideoAttentionProcessor2_0Tests(unittest.TestCase):
             "query_dim": 8, # query_dim = num_attention_heads * attention_head_dim
             "heads": 2, 
             "kv_heads": 2, 
-            "dim_head": 4, 
+            "dim_head": 4, #  
             "bias" : True,
             "cross_attention_dim": cross_attention_dim,
             "out_bias": True,
@@ -115,10 +115,12 @@ class AttnAddedLTXVideoAttentionProcessor2_0Tests(unittest.TestCase):
             "use_tpu_flash_attention" : True,
         }
         
-    def get_forward_arguments(self, query_dim, added_kv_proj_dim):
+    def get_forward_arguments(self, query_dim):
         batch_size = 2
+        added_kv_proj_dim = 6
+        sequence_length = 4096
 
-        hidden_states = torch.rand(batch_size, query_dim, 3, 2)
+        hidden_states = torch.rand(batch_size,sequence_length, query_dim)
         encoder_hidden_states = torch.rand(batch_size, 4, added_kv_proj_dim)
         attention_mask = None
 
@@ -128,7 +130,7 @@ class AttnAddedLTXVideoAttentionProcessor2_0Tests(unittest.TestCase):
             "attention_mask": attention_mask,
         }
     
-    def test_only_cross_attention(self):
+    def test_use_tpu_flash_attention_flag_when_true(self):
         torch.manual_seed(0)
         
         constructor_args = self.get_constructor_arguments()
@@ -136,4 +138,21 @@ class AttnAddedLTXVideoAttentionProcessor2_0Tests(unittest.TestCase):
 
         processor = attn.get_processor()
         assert isinstance(processor, LTXVideoAttentionProcessor2_0), "Processor not LTXVideoAttentionProcessor2_0"
-        print(f"Processor type: {type(processor)}")
+        
+        with patch.object(processor, '__call__') as mock_processor_call:
+            with patch('torch_xla.experimental.custom_kernel.flash_attention') as mock_flash_attention:
+                
+                forward_args = self.get_forward_arguments(
+                    query_dim=constructor_args["query_dim"]
+                )
+                attn_hidden_states = attn(**forward_args)
+
+                mock_processor_call.assert_called_once()
+
+                processor_args = mock_processor_call.call_args[0]
+                processor_kwargs = mock_processor_call.call_args[1]
+                
+                assert processor_args[0] == attn
+                assert torch.equal(processor_args[1], forward_args['hidden_states'])
+                assert torch.equal(processor_kwargs['encoder_hidden_states'], forward_args['encoder_hidden_states'])
+                assert processor_kwargs['attention_mask'] == forward_args['attention_mask']
