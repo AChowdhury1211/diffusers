@@ -124,11 +124,12 @@ class AttnAddedLTXVideoAttentionProcessor2_0Tests(unittest.TestCase):
                 pass
         batch_size = 2
         sequence_length = 4096
+        enco_sequence_length = 128
         
         if tpu_fast_attention:
             device = xm.xla_device()
             hidden_states = torch.rand(batch_size, sequence_length, query_dim).to(device)
-            encoder_hidden_states = torch.rand(batch_size, 4, query_dim).to(device)
+            encoder_hidden_states = torch.rand(batch_size, enco_sequence_length, query_dim).to(device)
             
         else:
             hidden_states = torch.rand(batch_size,sequence_length, query_dim)
