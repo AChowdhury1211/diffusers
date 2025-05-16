@@ -32,6 +32,11 @@ from ..modeling_outputs import Transformer2DModelOutput
 from ..modeling_utils import ModelMixin
 from ..normalization import AdaLayerNormSingle, RMSNorm
 
+try:
+    from torch_xla.experimental.custom_kernel import flash_attention
+except ImportError:
+    pass
+
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -60,9 +65,13 @@ class LTXVideoAttentionProcessor2_0:
             hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
         )
 
-        if attention_mask is not None:
+        if attention_mask is not None and (not attn.use_tpu_flash_attention):
             attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length, batch_size)
-            attention_mask = attention_mask.view(batch_size, attn.heads, -1, attention_mask.shape[-1])
+            # scaled_dot_product_attention expects attention_mask shape to be
+            # (batch, heads, source_length, target_length)
+            attention_mask = attention_mask.view(
+                batch_size, attn.heads, -1, attention_mask.shape[-1]
+            )
 
         if encoder_hidden_states is None:
             encoder_hidden_states = hidden_states
@@ -82,9 +91,48 @@ class LTXVideoAttentionProcessor2_0:
         key = key.unflatten(2, (attn.heads, -1)).transpose(1, 2)
         value = value.unflatten(2, (attn.heads, -1)).transpose(1, 2)
 
-        hidden_states = F.scaled_dot_product_attention(
-            query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
-        )
+        # the output of sdp = (batch, num_heads, seq_len, head_dim)
+        
+        # TODO: add support for attn.scale when moved to Torch 2.1
+        if attn.use_tpu_flash_attention:  # use tpu attention offload 'flash attention'
+            q_segment_indexes = None
+            if (
+                attention_mask is not None
+            ):  # if mask is required need to tune both segmenIds fields
+                # attention_mask = torch.squeeze(attention_mask).to(torch.float32)
+                attention_mask = attention_mask.to(torch.float32)
+                q_segment_indexes = torch.ones(
+                    batch_size, query.shape[2], device=query.device, dtype=torch.float32
+                )
+                assert (
+                    attention_mask.shape[1] == key.shape[2]
+                ), f"ERROR: KEY SHAPE must be same as attention mask [{key.shape[2]}, {attention_mask.shape[1]}]"
+
+            assert (
+                query.shape[2] % 128 == 0
+            ), f"ERROR: QUERY SHAPE must be divisible by 128 (TPU limitation) [{query.shape[2]}]"
+            assert (
+                key.shape[2] % 128 == 0
+            ), f"ERROR: KEY SHAPE must be divisible by 128 (TPU limitation) [{key.shape[2]}]"
+
+            # run the TPU kernel implemented in jax with pallas [torch_xla]
+            hidden_states = flash_attention(
+                q=query,
+                k=key,
+                v=value,
+                q_segment_ids=q_segment_indexes,
+                kv_segment_ids=attention_mask,
+                sm_scale=attn.scale,
+            )
+        else:
+            hidden_states = F.scaled_dot_product_attention(
+                query,
+                key,
+                value,
+                attn_mask=attention_mask,
+                dropout_p=0.0,
+                is_causal=False,
+            )
         hidden_states = hidden_states.transpose(1, 2).flatten(2, 3)
         hidden_states = hidden_states.to(query.dtype)
 
@@ -227,6 +275,7 @@ class LTXVideoTransformerBlock(nn.Module):
         attention_out_bias: bool = True,
         eps: float = 1e-6,
         elementwise_affine: bool = False,
+        use_tpu_flash_attention: bool = False,
     ):
         super().__init__()
 
@@ -241,6 +290,7 @@ class LTXVideoTransformerBlock(nn.Module):
             out_bias=attention_out_bias,
             qk_norm=qk_norm,
             processor=LTXVideoAttentionProcessor2_0(),
+            use_tpu_flash_attention=use_tpu_flash_attention,
         )
 
         self.norm2 = RMSNorm(dim, eps=eps, elementwise_affine=elementwise_affine)
@@ -254,6 +304,7 @@ class LTXVideoTransformerBlock(nn.Module):
             out_bias=attention_out_bias,
             qk_norm=qk_norm,
             processor=LTXVideoAttentionProcessor2_0(),
+            use_tpu_flash_attention=use_tpu_flash_attention,
         )
 
         self.ff = FeedForward(dim, activation_fn=activation_fn)
@@ -324,6 +375,8 @@ class LTXVideoTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin
             Activation function to use in feed-forward.
         qk_norm (`str`, defaults to `"rms_norm_across_heads"`):
             The normalization layer to use.
+        use_tpu_flash_attention (`bool`, defaults to `False`):
+            Whether to use TPU flash attention.
     """
 
     _supports_gradient_checkpointing = True
@@ -347,6 +400,7 @@ class LTXVideoTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin
         caption_channels: int = 4096,
         attention_bias: bool = True,
         attention_out_bias: bool = True,
+        use_tpu_flash_attention: bool = False,
     ) -> None:
         super().__init__()
 
@@ -383,6 +437,7 @@ class LTXVideoTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin
                     attention_out_bias=attention_out_bias,
                     eps=norm_eps,
                     elementwise_affine=norm_elementwise_affine,
+                    use_tpu_flash_attention=use_tpu_flash_attention,
                 )
                 for _ in range(num_layers)
             ]
@@ -392,6 +447,8 @@ class LTXVideoTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin
         self.proj_out = nn.Linear(inner_dim, out_channels)
 
         self.gradient_checkpointing = False
+        
+        self.use_tpu_flash_attention = use_tpu_flash_attention
 
     def forward(
         self,
@@ -424,10 +481,11 @@ class LTXVideoTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin
 
         image_rotary_emb = self.rope(hidden_states, num_frames, height, width, rope_interpolation_scale, video_coords)
 
-        # convert encoder_attention_mask to a bias the same way we do for attention_mask
-        if encoder_attention_mask is not None and encoder_attention_mask.ndim == 2:
-            encoder_attention_mask = (1 - encoder_attention_mask.to(hidden_states.dtype)) * -10000.0
-            encoder_attention_mask = encoder_attention_mask.unsqueeze(1)
+        if not self.use_tpu_flash_attention:
+            # convert encoder_attention_mask to a bias the same way we do for attention_mask
+            if encoder_attention_mask is not None and encoder_attention_mask.ndim == 2:
+                encoder_attention_mask = (1 - encoder_attention_mask.to(hidden_states.dtype)) * -10000.0
+                encoder_attention_mask = encoder_attention_mask.unsqueeze(1)
 
         batch_size = hidden_states.size(0)
         hidden_states = self.proj_in(hidden_states)
